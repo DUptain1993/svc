@@ -1,0 +1,21 @@
+[package]
+name = "svc-crypter"
+version = "0.1.0"
+edition.workspace = true
+
+[[bin]]
+name = "svc-crypter"
+path = "src/main.rs"
+
+[dependencies]
+crypter-ir = { path = "../crypter-ir" }
+crypter-synth = { path = "../crypter-synth" }
+crypter-vm = { path = "../crypter-vm" }
+aes-gcm.workspace = true
+argon2.workspace = true
+base64.workspace = true
+rand.workspace = true
+sha2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true

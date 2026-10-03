@@ -1,0 +1,12 @@
+[package]
+name = "crypter-synth"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+crypter-ir = { path = "../crypter-ir" }
+crypter-vm = { path = "../crypter-vm" }
+rand.workspace = true
+sha2.workspace = true
+hex.workspace = true
+serde_json.workspace = true

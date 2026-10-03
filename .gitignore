@@ -1,0 +1,22 @@
+# build artifacts
+/target/
+/out/
+**/*.rs.bk
+*.pdb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# secrets — never commit
+secrets.json
+*.secrets.json
+**/secrets.json
+.env
+.env.*
