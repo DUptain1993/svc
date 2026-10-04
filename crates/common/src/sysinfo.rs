@@ -8,17 +8,23 @@ pub struct SysInfo {
     pub arch: String,
     pub cwd: String,
     pub pid: u32,
+    pub build_id: String,
 }
 
 impl SysInfo {
     pub fn collect() -> Self {
         Self {
-            hostname: hostname::get().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+            hostname: hostname::get()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default(),
             username: whoami::username(),
             os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
-            cwd: std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default(),
+            cwd: std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
             pid: std::process::id(),
+            build_id: std::env::var("SVC_BUILD_ID").unwrap_or_default(),
         }
     }
 }

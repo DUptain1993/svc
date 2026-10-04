@@ -15,15 +15,21 @@ pub fn spawn_memfd(payload: &[u8], argv: &[&str]) -> Result<(), &'static str> {
     unsafe {
         let name = CString::new("svc").unwrap();
         let fd = memfd_create(name.as_ptr(), MFD_CLOEXEC);
-        if fd < 0 { return Err("memfd_create"); }
+        if fd < 0 {
+            return Err("memfd_create");
+        }
         let mut written = 0usize;
         while written < payload.len() {
             let n = write(fd, payload.as_ptr().add(written), payload.len() - written);
-            if n <= 0 { return Err("write"); }
+            if n <= 0 {
+                return Err("write");
+            }
             written += n as usize;
         }
         let pid = fork();
-        if pid < 0 { return Err("fork"); }
+        if pid < 0 {
+            return Err("fork");
+        }
         if pid == 0 {
             let cstrs: Vec<CString> = argv.iter().map(|s| CString::new(*s).unwrap()).collect();
             let mut ptrs: Vec<*const i8> = cstrs.iter().map(|c| c.as_ptr()).collect();

