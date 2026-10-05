@@ -1,0 +1,15 @@
+[package]
+name = "ops-watcher"
+version = "0.1.0"
+edition.workspace = true
+
+[[bin]]
+name = "ops-watcher"
+path = "src/main.rs"
+
+[dependencies]
+aes-gcm.workspace = true
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true

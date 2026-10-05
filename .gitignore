@@ -14,3 +14,4 @@ secrets.json
 .env
 .env.*
 Cargo.lock
+/ops/blobs/
